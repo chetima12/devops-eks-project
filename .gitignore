@@ -1,0 +1,39 @@
+# Node.js
+node_modules/
+
+# Environment files
+.env
+.env.*
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+
+# Terraform variable files that may contain secrets
+*.auto.tfvars
+*.auto.tfvars.json
+
+# Local override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json*.tfstate.*
+
+# IDE
+.vscode/
+.idea/
