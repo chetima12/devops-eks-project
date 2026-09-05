@@ -20,13 +20,6 @@ pipeline {
         IMAGE_TAG = "${BUILD_NUMBER}"
     }
 
-    stages {
-
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
 
         stage('Environment') {
             steps {
