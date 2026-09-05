@@ -531,11 +531,11 @@ if not path.exists():
     raise SystemExit("ERROR: helm/nodejs-app/values.yaml does not exist")
 
 text = path.read_text()
-tag = os.environ["IMAGE_TAG"]
+tag = os.environ.get("IMAGE_TAG", "")
 
 text, count = re.subn(
-    r"(?m)^(\s*tag:\s*\")[^\"]*(\".*)$",
-    r"\g<1>" + tag + r"\g<2>",
+    r"(?m)^(\\s*tag:\\s*\\\")[^\\\"]*(\\\".*)$",
+    r"\\g<1>" + tag + r"\\g<2>",
     text,
     count=1
 )
