@@ -601,12 +601,12 @@ path.write_text(text)
                         echo ""
                         echo "Git commit created."
 
-                        B64_AUTH=$(echo -n "${GIT_USERNAME}:${GIT_PASSWORD}" | | base64 -w 0)
+                        B64_AUTH=$(echo -n "${GIT_USERNAME}:${GIT_PASSWORD}" | base64 -w 0)
 
                         echo ""
                         echo "Pushing GitOps change to GitHub..."
 
-                        git push
+                        git -c http.extraheader="Authorization: Basic ${B64_AUTH}" push origin HEAD:refs/heads/main
 
                         echo ""
                         echo "================================="
