@@ -1,4 +1,5 @@
 pipeline {
+
     agent any
 
     tools {
@@ -8,7 +9,9 @@ pipeline {
     options {
         timeout(time: 30, unit: 'MINUTES')
         disableConcurrentBuilds()
-        buildDiscarder(logRotator(numToKeepStr: '10'))
+        buildDiscarder(
+            logRotator(numToKeepStr: '10')
+        )
         skipDefaultCheckout(true)
     }
 
@@ -21,11 +24,21 @@ pipeline {
     }
 
     stages {
+
         stage('Checkout') {
             steps {
+                echo '================================='
+                echo 'Checking Out Source Code'
+                echo '================================='
+
                 checkout scm
+
                 sh '''
+                    set -e
+                    echo "Git commit:"
                     git rev-parse --short HEAD
+
+                    echo "Git branch:"
                     git branch --show-current || true
                 '''
             }
@@ -34,6 +47,11 @@ pipeline {
         stage('Environment Check') {
             steps {
                 sh '''
+                    set -e
+                    echo '================================='
+                    echo 'Environment Check'
+                    echo '================================='
+
                     node --version
                     npm --version
                     docker --version
@@ -49,6 +67,10 @@ pipeline {
             steps {
                 dir('nodejs-eks-app') {
                     sh '''
+                        set -e
+                        echo '================================='
+                        echo 'Install Dependencies & Test'
+                        echo '================================='
                         npm ci
                         npm test
                     '''
@@ -59,11 +81,19 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 script {
-                    def scannerHome = tool name: 'SonarScanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                    def scannerHome = tool(
+                        name: 'SonarScanner',
+                        type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                    )
+
                     withSonarQubeEnv('SonarQube') {
-                        withEnv(["PATH+SONAR=${scannerHome}/bin"]) {
-                            sh 'sonar-scanner'
-                        }
+                        sh """
+                            set -e
+                            echo '================================='
+                            echo 'SonarQube Analysis'
+                            echo '================================='
+                            ${scannerHome}/bin/sonar-scanner
+                        """
                     }
                 }
             }
@@ -72,6 +102,11 @@ pipeline {
         stage('Trivy FS Scan') {
             steps {
                 sh '''
+                    set -e
+                    echo '================================='
+                    echo 'Trivy Filesystem Scan'
+                    echo '================================='
+
                     trivy fs \
                         --exit-code 1 \
                         --severity HIGH,CRITICAL \
@@ -81,40 +116,218 @@ pipeline {
             }
         }
 
-        stage('Docker Build & Scan') {
+        stage('Docker Build') {
             steps {
                 sh '''
-                    docker build --pull -t ${IMAGE_NAME}:${IMAGE_TAG} ./nodejs-eks-app
-                    trivy image --exit-code 1 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG}
+                    set -e
+                    echo '================================='
+                    echo 'Docker Build'
+                    echo '================================='
+
+                    docker build \
+                        --pull \
+                        -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                        ./nodejs-eks-app
                 '''
             }
         }
 
-        stage('AWS Deployment & Release') {
+        stage('Trivy Image Scan') {
             steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                sh '''
+                    set -e
+                    echo '================================='
+                    echo 'Trivy Docker Image Scan'
+                    echo '================================='
+
+                    trivy image \
+                        --exit-code 1 \
+                        --severity HIGH,CRITICAL \
+                        --pkg-types os,library \
+                        ${IMAGE_NAME}:${IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('AWS / ECR Validation') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                ]) {
                     sh '''
                         set -e
+                        echo '================================='
+                        echo 'AWS / ECR Validation'
+                        echo '================================='
+
                         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
                         ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-                        ECR_URI=${ECR_REGISTRY}/${ECR_REPOSITORY}
 
-                        # ECR Login & Push
-                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        aws ecr describe-repositories \
+                            --repository-names ${ECR_REPOSITORY} \
+                            --region ${AWS_REGION}
+                    '''
+                }
+            }
+        }
+
+        stage('ECR Login') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        set -e
+                        echo '================================='
+                        echo 'Amazon ECR Login'
+                        echo '================================='
+
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                        ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                    '''
+                }
+            }
+        }
+
+        stage('Push Image to ECR') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        set -e
+                        echo '================================='
+                        echo 'Push Docker Image to ECR'
+                        echo '================================='
+
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                        ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
+
                         docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_URI}:${IMAGE_TAG}
                         docker push ${ECR_URI}:${IMAGE_TAG}
+                    '''
+                }
+            }
+        }
 
-                        # Helm Deploy to EKS
-                        aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER}
-                        helm upgrade --install nodejs-app helm/nodejs-app \
-                            --namespace nodejs-app \
-                            --create-namespace \
-                            --set image.repository=${ECR_URI} \
-                            --set image.tag=${IMAGE_TAG}
+        stage('Verify ECR Image') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        set -e
+                        echo '================================='
+                        echo 'Verify ECR Image'
+                        echo '================================='
 
-                        # Verification
-                        kubectl rollout status deployment/nodejs-app-nodejs-app -n nodejs-app --timeout=180s
-                        kubectl get pods -n nodejs-app
+                        aws ecr describe-images \
+                            --repository-name ${ECR_REPOSITORY} \
+                            --image-ids imageTag=${IMAGE_TAG} \
+                            --region ${AWS_REGION}
+                    '''
+                }
+            }
+        }
+
+        stage('Update GitOps Image Tag') {
+            steps {
+                sh '''
+                    set -e
+                    echo '================================='
+                    echo 'Update GitOps Image Tag'
+                    echo '================================='
+
+                    python3 - <<'PY'
+from pathlib import Path
+import os
+import re
+
+path = Path("helm/nodejs-app/values.yaml")
+
+if not path.exists():
+    raise SystemExit("ERROR: helm/nodejs-app/values.yaml does not exist")
+
+text = path.read_text()
+tag = os.environ["IMAGE_TAG"]
+
+# Correct regex escaping in Python multiline heredoc
+text, count = re.subn(
+    r'(?m)^(\s*tag:\s*")[^"]*(".*)$',
+    rf'\g<1>{tag}\g<2>',
+    text,
+    count=1
+)
+
+if count != 1:
+    raise SystemExit("ERROR: Could not find image.tag in helm/nodejs-app/values.yaml")
+
+path.write_text(text)
+PY
+
+                    git diff -- helm/nodejs-app/values.yaml
+                '''
+            }
+        }
+
+        stage('Commit GitOps Change') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-credentials',
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+                        echo '================================='
+                        echo 'Commit GitOps Change'
+                        echo '================================='
+
+                        git config user.name "jenkins"
+                        git config user.email "jenkins@localhost"
+
+                        git add helm/nodejs-app/values.yaml
+
+                        if git diff --cached --quiet; then
+                            echo "No GitOps changes detected."
+                            exit 0
+                        fi
+
+                        git commit -m "chore: deploy nodejs-eks-app ${IMAGE_TAG}"
+
+                        # Secure authenticated push without leaking token in git remote logs
+                        B64_AUTH=$(echo -n "${GIT_USERNAME}:${GIT_PASSWORD}" | base64)
+                        git -c http.extraheader="Authorization: Basic ${B64_AUTH}" push origin HEAD:refs/heads/main
+                    '''
+                }
+            }
+        }
+
+        stage('GitOps Deployment Summary') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        echo '================================='
+                        echo 'GitOps Deployment Summary'
+                        echo '================================='
+
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+                        echo "Application: nodejs-eks-app"
+                        echo "Image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+                        echo "GitOps file: helm/nodejs-app/values.yaml"
+                        
+                        echo "Jenkins CI: COMPLETE"
+                        echo "ECR Push: COMPLETE"
+                        echo "GitOps Update: COMPLETE"
+                        echo "Argo CD CD: PENDING/AUTOMATIC"
                     '''
                 }
             }
@@ -122,13 +335,16 @@ pipeline {
     }
 
     post {
+        success {
+            echo 'CI/CD PIPELINE SUCCESSFUL'
+        }
+        failure {
+            echo 'CI/CD PIPELINE FAILED'
+        }
         always {
             sh '''
-                AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
-                ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
-
+                set +e
                 docker image rm ${IMAGE_NAME}:${IMAGE_TAG} 2>/dev/null || true
-                docker image rm ${ECR_URI}:${IMAGE_TAG} 2>/dev/null || true
             '''
             cleanWs()
         }
