@@ -8,22 +8,16 @@ pipeline {
 
     options {
         timeout(time: 30, unit: 'MINUTES')
-
         disableConcurrentBuilds()
-
         buildDiscarder(
             logRotator(numToKeepStr: '10')
         )
     }
 
     environment {
-
         AWS_REGION = 'us-east-1'
-
         ECR_REPOSITORY = 'nodejs-eks-app'
-
         EKS_CLUSTER = 'nodejs-eks-cluster'
-
         IMAGE_TAG = "${BUILD_NUMBER}"
     }
 
@@ -55,25 +49,35 @@ pipeline {
 
         stage('Install Dependencies') {
             steps {
-                sh '''
-                    npm ci
-                '''
+                dir('nodejs-eks-app') {
+                    sh '''
+                        echo "Installing Node.js dependencies..."
+
+                        node --version
+                        npm --version
+
+                        npm ci
+                    '''
+                }
             }
         }
 
         stage('Unit Tests') {
             steps {
-                sh '''
-                    npm test
-                '''
+                dir('nodejs-eks-app') {
+                    sh '''
+                        echo "Running unit tests..."
+                        npm test
+                    '''
+                }
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('SonarQube') {
-
                     sh '''
+                        echo "Running SonarQube analysis..."
                         sonar-scanner
                     '''
                 }
@@ -83,10 +87,12 @@ pipeline {
         stage('Trivy Filesystem Scan') {
             steps {
                 sh '''
+                    echo "Scanning application filesystem..."
+
                     trivy fs \
                         --exit-code 1 \
                         --severity HIGH,CRITICAL \
-                        .
+                        ./nodejs-eks-app
                 '''
             }
         }
@@ -94,9 +100,11 @@ pipeline {
         stage('Docker Build') {
             steps {
                 sh '''
+                    echo "Building Docker image..."
+
                     docker build \
                         -t nodejs-eks-app:${IMAGE_TAG} \
-                        .
+                        ./nodejs-eks-app
                 '''
             }
         }
@@ -104,6 +112,8 @@ pipeline {
         stage('Trivy Image Scan') {
             steps {
                 sh '''
+                    echo "Scanning Docker image..."
+
                     trivy image \
                         --exit-code 1 \
                         --severity HIGH,CRITICAL \
@@ -114,70 +124,108 @@ pipeline {
 
         stage('ECR Login') {
             steps {
-                sh '''
-                    AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
-                        --query Account \
-                        --output text)
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        echo "Logging into Amazon ECR..."
 
-                    aws ecr get-login-password \
-                        --region ${AWS_REGION} | \
-                    docker login \
-                        --username AWS \
-                        --password-stdin \
-                        ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-                '''
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
+
+                        aws ecr get-login-password \
+                            --region ${AWS_REGION} | \
+                        docker login \
+                            --username AWS \
+                            --password-stdin \
+                            ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    '''
+                }
             }
         }
 
         stage('Push Image') {
             steps {
-                sh '''
-                    AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
-                        --query Account \
-                        --output text)
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        echo "Pushing Docker image to ECR..."
 
-                    ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
 
-                    docker tag \
-                        nodejs-eks-app:${IMAGE_TAG} \
-                        ${ECR_URI}:${IMAGE_TAG}
+                        ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
 
-                    docker push \
-                        ${ECR_URI}:${IMAGE_TAG}
-                '''
+                        docker tag \
+                            nodejs-eks-app:${IMAGE_TAG} \
+                            ${ECR_URI}:${IMAGE_TAG}
+
+                        docker push \
+                            ${ECR_URI}:${IMAGE_TAG}
+                    '''
+                }
             }
         }
 
         stage('Deploy to EKS') {
             steps {
-                sh '''
-                    aws eks update-kubeconfig \
-                        --region ${AWS_REGION} \
-                        --name ${EKS_CLUSTER}
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        echo "Updating EKS kubeconfig..."
 
-                    helm upgrade --install nodejs-app \
-                        helm/nodejs-app \
-                        --namespace nodejs-app \
-                        --create-namespace \
-                        --set image.tag=${IMAGE_TAG}
-                '''
+                        aws eks update-kubeconfig \
+                            --region ${AWS_REGION} \
+                            --name ${EKS_CLUSTER}
+
+                        echo "Deploying application with Helm..."
+
+                        helm upgrade --install nodejs-app \
+                            helm/nodejs-app \
+                            --namespace nodejs-app \
+                            --create-namespace \
+                            --set image.tag=${IMAGE_TAG} \
+                            --force-conflicts
+                    '''
+                }
             }
         }
 
         stage('Verify Deployment') {
             steps {
-                sh '''
-                    kubectl rollout status \
-                        deployment/nodejs-app-nodejs-app \
-                        -n nodejs-app \
-                        --timeout=180s
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        echo "Verifying Kubernetes deployment..."
 
-                    kubectl get pods \
-                        -n nodejs-app
+                        kubectl rollout status \
+                            deployment/nodejs-app-nodejs-app \
+                            -n nodejs-app \
+                            --timeout=180s
 
-                    kubectl get ingress \
-                        -n nodejs-app
-                '''
+                        echo "Pods:"
+                        kubectl get pods \
+                            -n nodejs-app \
+                            -o wide
+
+                        echo "Services:"
+                        kubectl get svc \
+                            -n nodejs-app
+
+                        echo "Ingress:"
+                        kubectl get ingress \
+                            -n nodejs-app
+                    '''
+                }
             }
         }
     }
