@@ -25,6 +25,12 @@ pipeline {
 
     stages {
 
+        /*
+         * ==========================================
+         * CHECKOUT
+         * ==========================================
+         */
+
         stage('Checkout') {
             steps {
                 echo '================================='
@@ -35,63 +41,134 @@ pipeline {
 
                 sh '''
                     set -e
+
+                    echo ""
                     echo "Git commit:"
                     git rev-parse --short HEAD
 
+                    echo ""
                     echo "Git branch:"
                     git branch --show-current || true
+
+                    echo ""
+                    echo "Git remote:"
+                    git remote get-url origin || true
                 '''
             }
         }
+
+
+        /*
+         * ==========================================
+         * ENVIRONMENT
+         * ==========================================
+         */
 
         stage('Environment Check') {
             steps {
                 sh '''
                     set -e
+
                     echo '================================='
                     echo 'Environment Check'
                     echo '================================='
 
+                    echo ""
+                    echo "Node.js:"
                     node --version
+
+                    echo ""
+                    echo "npm:"
                     npm --version
+
+                    echo ""
+                    echo "Docker:"
                     docker --version
+
+                    echo ""
+                    echo "AWS CLI:"
                     aws --version
+
+                    echo ""
+                    echo "kubectl:"
                     kubectl version --client
+
+                    echo ""
+                    echo "Helm:"
                     helm version
+
+                    echo ""
+                    echo "Trivy:"
                     trivy --version
+
+                    echo ""
+                    echo "Jenkins Build:"
+                    echo "${BUILD_NUMBER}"
                 '''
             }
         }
 
+
+        /*
+         * ==========================================
+         * INSTALL + TEST
+         * ==========================================
+         */
+
         stage('Install & Test') {
             steps {
+
                 dir('nodejs-eks-app') {
+
                     sh '''
                         set -e
+
                         echo '================================='
-                        echo 'Install Dependencies & Test'
+                        echo 'Install Dependencies'
                         echo '================================='
+
                         npm ci
+
+                        echo ""
+                        echo "================================="
+                        echo "Run Unit Tests"
+                        echo "================================="
+
                         npm test
                     '''
                 }
             }
         }
 
+
+        /*
+         * ==========================================
+         * SONARQUBE
+         * ==========================================
+         */
+
         stage('SonarQube Analysis') {
             steps {
+
                 script {
+
                     def scannerHome = tool(
                         name: 'SonarScanner',
                         type: 'hudson.plugins.sonar.SonarRunnerInstallation'
                     )
 
                     withSonarQubeEnv('SonarQube') {
+
                         sh """
                             set -e
+
                             echo '================================='
                             echo 'SonarQube Analysis'
                             echo '================================='
+
+                            echo ""
+                            echo "Running SonarQube analysis..."
+
                             ${scannerHome}/bin/sonar-scanner
                         """
                     }
@@ -99,10 +176,19 @@ pipeline {
             }
         }
 
+
+        /*
+         * ==========================================
+         * TRIVY FILESYSTEM SCAN
+         * ==========================================
+         */
+
         stage('Trivy FS Scan') {
             steps {
+
                 sh '''
                     set -e
+
                     echo '================================='
                     echo 'Trivy Filesystem Scan'
                     echo '================================='
@@ -112,114 +198,278 @@ pipeline {
                         --severity HIGH,CRITICAL \
                         --skip-dirs "nodejs-eks-app/node_modules" \
                         ./nodejs-eks-app
+
+                    echo ""
+                    echo "Trivy filesystem scan PASSED."
                 '''
             }
         }
 
+
+        /*
+         * ==========================================
+         * DOCKER BUILD
+         * ==========================================
+         */
+
         stage('Docker Build') {
             steps {
+
                 sh '''
                     set -e
+
                     echo '================================='
                     echo 'Docker Build'
                     echo '================================='
+
+                    echo ""
+                    echo "Image:"
+                    echo "${IMAGE_NAME}:${IMAGE_TAG}"
 
                     docker build \
                         --pull \
                         -t ${IMAGE_NAME}:${IMAGE_TAG} \
                         ./nodejs-eks-app
+
+                    echo ""
+                    echo "Docker image successfully built."
+
+                    docker images ${IMAGE_NAME}:${IMAGE_TAG}
                 '''
             }
         }
 
+
+        /*
+         * ==========================================
+         * TRIVY IMAGE SCAN
+         * ==========================================
+         */
+
         stage('Trivy Image Scan') {
             steps {
+
                 sh '''
                     set -e
+
                     echo '================================='
                     echo 'Trivy Docker Image Scan'
                     echo '================================='
+
+                    echo ""
+                    echo "Scanning:"
+                    echo "${IMAGE_NAME}:${IMAGE_TAG}"
 
                     trivy image \
                         --exit-code 1 \
                         --severity HIGH,CRITICAL \
                         --pkg-types os,library \
                         ${IMAGE_NAME}:${IMAGE_TAG}
+
+                    echo ""
+                    echo "================================="
+                    echo "SECURITY SCAN PASSED"
+                    echo "================================="
+
+                    echo "No HIGH or CRITICAL vulnerabilities detected."
                 '''
             }
         }
 
+
+        /*
+         * ==========================================
+         * AWS / ECR
+         * ==========================================
+         */
+
         stage('AWS / ECR Validation') {
             steps {
+
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials'
+                    ]
                 ]) {
+
                     sh '''
                         set -e
+
                         echo '================================='
                         echo 'AWS / ECR Validation'
                         echo '================================='
 
-                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                        echo ""
+                        echo "AWS Identity:"
+
+                        aws sts get-caller-identity
+
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
+
                         ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                        ECR_URI=${ECR_REGISTRY}/${ECR_REPOSITORY}
+
+                        echo ""
+                        echo "AWS Account:"
+                        echo "${AWS_ACCOUNT_ID}"
+
+                        echo ""
+                        echo "AWS Region:"
+                        echo "${AWS_REGION}"
+
+                        echo ""
+                        echo "ECR Registry:"
+                        echo "${ECR_REGISTRY}"
+
+                        echo ""
+                        echo "ECR Repository:"
+                        echo "${ECR_REPOSITORY}"
+
+                        echo ""
+                        echo "ECR URI:"
+                        echo "${ECR_URI}"
+
+                        echo ""
+                        echo "Checking ECR repository..."
 
                         aws ecr describe-repositories \
                             --repository-names ${ECR_REPOSITORY} \
                             --region ${AWS_REGION}
+
+                        echo ""
+                        echo "ECR validation PASSED."
                     '''
                 }
             }
         }
 
+
+        /*
+         * ==========================================
+         * ECR LOGIN
+         * ==========================================
+         */
+
         stage('ECR Login') {
             steps {
+
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials'
+                    ]
                 ]) {
+
                     sh '''
                         set -e
+
                         echo '================================='
                         echo 'Amazon ECR Login'
                         echo '================================='
 
-                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
+
                         ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-                        aws ecr get-login-password --region ${AWS_REGION} | \
-                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        aws ecr get-login-password \
+                            --region ${AWS_REGION} | \
+                        docker login \
+                            --username AWS \
+                            --password-stdin \
+                            ${ECR_REGISTRY}
+
+                        echo ""
+                        echo "ECR login PASSED."
                     '''
                 }
             }
         }
 
+
+        /*
+         * ==========================================
+         * TAG + PUSH
+         * ==========================================
+         */
+
         stage('Push Image to ECR') {
             steps {
+
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials'
+                    ]
                 ]) {
+
                     sh '''
                         set -e
+
                         echo '================================='
                         echo 'Push Docker Image to ECR'
                         echo '================================='
 
-                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
+
                         ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
 
-                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_URI}:${IMAGE_TAG}
-                        docker push ${ECR_URI}:${IMAGE_TAG}
+                        echo ""
+                        echo "Local image:"
+                        echo "${IMAGE_NAME}:${IMAGE_TAG}"
+
+                        echo ""
+                        echo "ECR image:"
+                        echo "${ECR_URI}:${IMAGE_TAG}"
+
+                        echo ""
+                        echo "Creating ECR tag..."
+
+                        docker tag \
+                            ${IMAGE_NAME}:${IMAGE_TAG} \
+                            ${ECR_URI}:${IMAGE_TAG}
+
+                        echo ""
+                        echo "Pushing image..."
+
+                        docker push \
+                            ${ECR_URI}:${IMAGE_TAG}
+
+                        echo ""
+                        echo "================================="
+                        echo "IMAGE PUSH SUCCESSFUL"
+                        echo "================================="
                     '''
                 }
             }
         }
 
+
+        /*
+         * ==========================================
+         * VERIFY ECR IMAGE
+         * ==========================================
+         */
+
         stage('Verify ECR Image') {
             steps {
+
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials'
+                    ]
                 ]) {
+
                     sh '''
                         set -e
+
                         echo '================================='
                         echo 'Verify ECR Image'
                         echo '================================='
@@ -228,20 +478,49 @@ pipeline {
                             --repository-name ${ECR_REPOSITORY} \
                             --image-ids imageTag=${IMAGE_TAG} \
                             --region ${AWS_REGION}
+
+                        echo ""
+                        echo "ECR image verification PASSED."
                     '''
                 }
             }
         }
 
+
+        /*
+         * ==========================================
+         * GITOPS
+         * ==========================================
+         *
+         * Jenkins does NOT deploy directly to EKS.
+         *
+         * Jenkins updates Helm values in Git.
+         * Argo CD detects the Git change and
+         * deploys the new image to EKS.
+         *
+         * ==========================================
+         */
+
         stage('Update GitOps Image Tag') {
             steps {
+
                 sh '''
                     set -e
+
                     echo '================================='
                     echo 'Update GitOps Image Tag'
                     echo '================================='
 
-                    python3 - <<'PY'
+                    echo ""
+                    echo "New image tag:"
+                    echo "${IMAGE_TAG}"
+
+                    echo ""
+                    echo "Current Helm values:"
+
+                    cat helm/nodejs-app/values.yaml
+
+                    python3 -c '
 from pathlib import Path
 import os
 import re
@@ -254,10 +533,9 @@ if not path.exists():
 text = path.read_text()
 tag = os.environ["IMAGE_TAG"]
 
-# Correct regex escaping in Python multiline heredoc
 text, count = re.subn(
-    r'(?m)^(\s*tag:\s*")[^"]*(".*)$',
-    rf'\g<1>{tag}\g<2>',
+    r"(?m)^(\s*tag:\s*\")[^\"]*(\".*)$",
+    r"\g<1>" + tag + r"\g<2>",
     text,
     count=1
 )
@@ -266,15 +544,31 @@ if count != 1:
     raise SystemExit("ERROR: Could not find image.tag in helm/nodejs-app/values.yaml")
 
 path.write_text(text)
-PY
+'
+
+                    echo ""
+                    echo "Updated Helm values:"
+
+                    cat helm/nodejs-app/values.yaml
+
+                    echo ""
+                    echo "Git diff:"
 
                     git diff -- helm/nodejs-app/values.yaml
                 '''
             }
         }
 
+
+        /*
+         * ==========================================
+         * GIT COMMIT + PUSH
+         * ==========================================
+         */
+
         stage('Commit GitOps Change') {
             steps {
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'github-credentials',
@@ -282,8 +576,10 @@ PY
                         passwordVariable: 'GIT_PASSWORD'
                     )
                 ]) {
+
                     sh '''
                         set -e
+
                         echo '================================='
                         echo 'Commit GitOps Change'
                         echo '================================='
@@ -294,36 +590,85 @@ PY
                         git add helm/nodejs-app/values.yaml
 
                         if git diff --cached --quiet; then
+                            echo ""
                             echo "No GitOps changes detected."
                             exit 0
                         fi
 
-                        git commit -m "chore: deploy nodejs-eks-app ${IMAGE_TAG}"
+                        git commit \
+                            -m "chore: deploy nodejs-eks-app ${IMAGE_TAG}"
 
-                        # Secure authenticated push without leaking token in git remote logs
+                        echo ""
+                        echo "Git commit created."
+
                         B64_AUTH=$(echo -n "${GIT_USERNAME}:${GIT_PASSWORD}" | base64)
+
+                        echo ""
+                        echo "Pushing GitOps change to GitHub..."
+
                         git -c http.extraheader="Authorization: Basic ${B64_AUTH}" push origin HEAD:refs/heads/main
+
+                        echo ""
+                        echo "================================="
+                        echo "GITOPS UPDATE SUCCESSFUL"
+                        echo "================================="
                     '''
                 }
             }
         }
 
+
+        /*
+         * ==========================================
+         * GITOPS SUMMARY
+         * ==========================================
+         */
+
         stage('GitOps Deployment Summary') {
             steps {
+
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials'
+                    ]
                 ]) {
+
                     sh '''
+                        set -e
+
                         echo '================================='
                         echo 'GitOps Deployment Summary'
                         echo '================================='
 
-                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
 
-                        echo "Application: nodejs-eks-app"
-                        echo "Image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
-                        echo "GitOps file: helm/nodejs-app/values.yaml"
-                        
+                        ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
+
+                        echo ""
+                        echo "Application:"
+                        echo "nodejs-eks-app"
+
+                        echo ""
+                        echo "Image:"
+                        echo "${ECR_URI}:${IMAGE_TAG}"
+
+                        echo ""
+                        echo "GitOps file:"
+                        echo "helm/nodejs-app/values.yaml"
+
+                        echo ""
+                        echo "Image tag:"
+                        grep -A3 '^image:' helm/nodejs-app/values.yaml || true
+
+                        echo ""
+                        echo "================================="
+                        echo "Argo CD will now reconcile EKS"
+                        echo "================================="
+
+                        echo ""
                         echo "Jenkins CI: COMPLETE"
                         echo "ECR Push: COMPLETE"
                         echo "GitOps Update: COMPLETE"
@@ -334,18 +679,75 @@ PY
         }
     }
 
+
+    /*
+     * ==========================================
+     * POST ACTIONS
+     * ==========================================
+     */
+
     post {
+
         success {
+
+            echo '================================='
             echo 'CI/CD PIPELINE SUCCESSFUL'
+            echo '================================='
+
+            echo "Build Number: ${BUILD_NUMBER}"
+            echo "Image: ${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "ECR Repository: ${ECR_REPOSITORY}"
+            echo "EKS Cluster: ${EKS_CLUSTER}"
+
+            echo ""
+            echo "Argo CD should now detect the GitOps change."
         }
+
+
         failure {
+
+            echo '================================='
             echo 'CI/CD PIPELINE FAILED'
+            echo '================================='
+
+            echo "Build Number: ${BUILD_NUMBER}"
+            echo "Check the failed stage above."
         }
+
+
         always {
+
+            echo '================================='
+            echo 'Pipeline Cleanup'
+            echo '================================='
+
             sh '''
                 set +e
-                docker image rm ${IMAGE_NAME}:${IMAGE_TAG} 2>/dev/null || true
+
+                echo "Removing local Docker images..."
+
+                docker image rm \
+                    ${IMAGE_NAME}:${IMAGE_TAG} \
+                    2>/dev/null || true
+
+                AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                    --query Account \
+                    --output text \
+                    2>/dev/null || true)
+
+                if [ -n "${AWS_ACCOUNT_ID}" ]; then
+
+                    ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
+
+                    docker image rm \
+                        ${ECR_URI}:${IMAGE_TAG} \
+                        2>/dev/null || true
+
+                fi
+
+                echo "Docker cleanup completed."
             '''
+
             cleanWs()
         }
     }
