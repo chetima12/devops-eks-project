@@ -1,4 +1,3 @@
-```groovy
 pipeline {
 
     agent any
@@ -160,29 +159,18 @@ pipeline {
 
                     withSonarQubeEnv('SonarQube') {
 
-                        withEnv([
-                            "PATH+SONAR=${scannerHome}/bin"
-                        ]) {
+                        sh """
+                            set -e
 
-                            sh '''
-                                set -e
+                            echo '================================='
+                            echo 'SonarQube Analysis'
+                            echo '================================='
 
-                                echo '================================='
-                                echo 'SonarQube Analysis'
-                                echo '================================='
+                            echo ""
+                            echo "Running SonarQube analysis..."
 
-                                echo ""
-                                echo "SonarScanner:"
-                                which sonar-scanner
-
-                                sonar-scanner --version
-
-                                echo ""
-                                echo "Running SonarQube analysis..."
-
-                                sonar-scanner
-                            '''
-                        }
+                            ${scannerHome}/bin/sonar-scanner
+                        """
                     }
                 }
             }
@@ -532,7 +520,7 @@ pipeline {
 
                     cat helm/nodejs-app/values.yaml
 
-                    python3 - <<'PY'
+                    python3 -c '
 from pathlib import Path
 import os
 import re
@@ -540,28 +528,23 @@ import re
 path = Path("helm/nodejs-app/values.yaml")
 
 if not path.exists():
-    raise SystemExit(
-        "ERROR: helm/nodejs-app/values.yaml does not exist"
-    )
+    raise SystemExit("ERROR: helm/nodejs-app/values.yaml does not exist")
 
 text = path.read_text()
-
-tag = os.environ["IMAGE_TAG"]
+tag = os.environ.get("IMAGE_TAG", "")
 
 text, count = re.subn(
-    r'(?m)^(\\s*tag:\\s*")[^"]*(".*)$',
-    rf'\\g<1>{tag}\\g<2>',
+    r"(?m)^(\\s*tag:\\s*\\\")[^\\\"]*(\\\".*)$",
+    r"\\g<1>" + tag + r"\\g<2>",
     text,
     count=1
 )
 
 if count != 1:
-    raise SystemExit(
-        "ERROR: Could not find image.tag in helm/nodejs-app/values.yaml"
-    )
+    raise SystemExit("ERROR: Could not find image.tag in helm/nodejs-app/values.yaml")
 
 path.write_text(text)
-PY
+'
 
                     echo ""
                     echo "Updated Helm values:"
@@ -618,13 +601,12 @@ PY
                         echo ""
                         echo "Git commit created."
 
-                        git remote set-url origin \
-                            https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/chetima12/devops-eks-project.git
+                        B64_AUTH=$(echo -n "${GIT_USERNAME}:${GIT_PASSWORD}" | base64)
 
                         echo ""
                         echo "Pushing GitOps change to GitHub..."
 
-                        git push origin HEAD:main
+                        git -c http.extraheader="Authorization: Basic ${B64_AUTH}" push origin HEAD:refs/heads/main
 
                         echo ""
                         echo "================================="
@@ -645,38 +627,54 @@ PY
         stage('GitOps Deployment Summary') {
             steps {
 
-                sh '''
-                    echo '================================='
-                    echo 'GitOps Deployment Summary'
-                    echo '================================='
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials'
+                    ]
+                ]) {
 
-                    echo ""
-                    echo "Application:"
-                    echo "nodejs-eks-app"
+                    sh '''
+                        set -e
 
-                    echo ""
-                    echo "Image:"
-                    echo "171226592813.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+                        echo '================================='
+                        echo 'GitOps Deployment Summary'
+                        echo '================================='
 
-                    echo ""
-                    echo "GitOps file:"
-                    echo "helm/nodejs-app/values.yaml"
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
 
-                    echo ""
-                    echo "Image tag:"
-                    grep -A3 '^image:' helm/nodejs-app/values.yaml || true
+                        ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
 
-                    echo ""
-                    echo "================================="
-                    echo "Argo CD will now reconcile EKS"
-                    echo "================================="
+                        echo ""
+                        echo "Application:"
+                        echo "nodejs-eks-app"
 
-                    echo ""
-                    echo "Jenkins CI: COMPLETE"
-                    echo "ECR Push: COMPLETE"
-                    echo "GitOps Update: COMPLETE"
-                    echo "Argo CD CD: PENDING/AUTOMATIC"
-                '''
+                        echo ""
+                        echo "Image:"
+                        echo "${ECR_URI}:${IMAGE_TAG}"
+
+                        echo ""
+                        echo "GitOps file:"
+                        echo "helm/nodejs-app/values.yaml"
+
+                        echo ""
+                        echo "Image tag:"
+                        grep -A3 '^image:' helm/nodejs-app/values.yaml || true
+
+                        echo ""
+                        echo "================================="
+                        echo "Argo CD will now reconcile EKS"
+                        echo "================================="
+
+                        echo ""
+                        echo "Jenkins CI: COMPLETE"
+                        echo "ECR Push: COMPLETE"
+                        echo "GitOps Update: COMPLETE"
+                        echo "Argo CD CD: PENDING/AUTOMATIC"
+                    '''
+                }
             }
         }
     }
@@ -754,4 +752,3 @@ PY
         }
     }
 }
-```
