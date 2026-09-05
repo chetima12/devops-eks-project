@@ -2,7 +2,7 @@ replicaCount: 3
 
 image:
   repository: 171226592813.dkr.ecr.us-east-1.amazonaws.com/nodejs-eks-app
-  tag: "1.1"
+  tag: "secure2"
   pullPolicy: IfNotPresent
 
 service:
