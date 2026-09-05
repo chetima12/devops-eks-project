@@ -1,0 +1,203 @@
+pipeline {
+
+    agent any
+
+    tools {
+        nodejs 'NodeJS-20'
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+
+        disableConcurrentBuilds()
+
+        buildDiscarder(
+            logRotator(numToKeepStr: '10')
+        )
+    }
+
+    environment {
+
+        AWS_REGION = 'us-east-1'
+
+        ECR_REPOSITORY = 'nodejs-eks-app'
+
+        EKS_CLUSTER = 'nodejs-eks-cluster'
+
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Environment') {
+            steps {
+                sh '''
+                    echo "================================="
+                    echo "Environment"
+                    echo "================================="
+
+                    node --version
+                    npm --version
+                    docker --version
+                    aws --version
+                    kubectl version --client
+                    helm version
+                    trivy --version
+                '''
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    npm ci
+                '''
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                sh '''
+                    npm test
+                '''
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+
+                    sh '''
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+
+        stage('Trivy Filesystem Scan') {
+            steps {
+                sh '''
+                    trivy fs \
+                        --exit-code 1 \
+                        --severity HIGH,CRITICAL \
+                        .
+                '''
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    docker build \
+                        -t nodejs-eks-app:${IMAGE_TAG} \
+                        .
+                '''
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                    trivy image \
+                        --exit-code 1 \
+                        --severity HIGH,CRITICAL \
+                        nodejs-eks-app:${IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('ECR Login') {
+            steps {
+                sh '''
+                    AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                        --query Account \
+                        --output text)
+
+                    aws ecr get-login-password \
+                        --region ${AWS_REGION} | \
+                    docker login \
+                        --username AWS \
+                        --password-stdin \
+                        ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                '''
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                sh '''
+                    AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                        --query Account \
+                        --output text)
+
+                    ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}
+
+                    docker tag \
+                        nodejs-eks-app:${IMAGE_TAG} \
+                        ${ECR_URI}:${IMAGE_TAG}
+
+                    docker push \
+                        ${ECR_URI}:${IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                sh '''
+                    aws eks update-kubeconfig \
+                        --region ${AWS_REGION} \
+                        --name ${EKS_CLUSTER}
+
+                    helm upgrade --install nodejs-app \
+                        helm/nodejs-app \
+                        --namespace nodejs-app \
+                        --create-namespace \
+                        --set image.tag=${IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    kubectl rollout status \
+                        deployment/nodejs-app-nodejs-app \
+                        -n nodejs-app \
+                        --timeout=180s
+
+                    kubectl get pods \
+                        -n nodejs-app
+
+                    kubectl get ingress \
+                        -n nodejs-app
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo '================================='
+            echo 'CI/CD PIPELINE SUCCESSFUL'
+            echo '================================='
+        }
+
+        failure {
+            echo '================================='
+            echo 'CI/CD PIPELINE FAILED'
+            echo '================================='
+        }
+
+        always {
+            echo "Build number: ${BUILD_NUMBER}"
+        }
+    }
+}
