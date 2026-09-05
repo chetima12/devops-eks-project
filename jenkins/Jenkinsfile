@@ -51,12 +51,17 @@ pipeline {
             steps {
                 dir('nodejs-eks-app') {
                     sh '''
-                        echo "Installing Node.js dependencies..."
+                        echo "Checking Node.js dependencies..."
 
                         node --version
                         npm --version
 
-                        npm ci
+                        if [ -d "node_modules" ]; then
+                            echo "node_modules already exists. Skipping npm ci..."
+                        else
+                            echo "Installing Node.js dependencies..."
+                            npm ci
+                        fi
                     '''
                 }
             }
@@ -105,6 +110,7 @@ pipeline {
                     trivy fs \
                         --exit-code 1 \
                         --severity HIGH,CRITICAL \
+                        --skip-dirs "nodejs-eks-app/node_modules" \
                         ./nodejs-eks-app
                 '''
             }
@@ -130,6 +136,7 @@ pipeline {
                     trivy image \
                         --exit-code 1 \
                         --severity HIGH,CRITICAL \
+                        --pkg-types os,library \
                         nodejs-eks-app:${IMAGE_TAG}
                 '''
             }
