@@ -1,10 +1,8 @@
 pipeline {
-
     agent any
 
     tools {
         nodejs 'NodeJS-20'
-        sonarRunner 'SonarScanner'
     }
 
     options {
@@ -76,11 +74,24 @@ pipeline {
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh '''
-                        echo "Running SonarQube analysis..."
-                        sonar-scanner
-                    '''
+                script {
+                    def scannerHome = tool(
+                        name: 'SonarScanner',
+                        type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                    )
+
+                    withSonarQubeEnv('SonarQube') {
+                        withEnv(["PATH+SONAR=${scannerHome}/bin"]) {
+                            sh '''
+                                echo "Running SonarQube analysis..."
+
+                                which sonar-scanner
+                                sonar-scanner --version
+
+                                sonar-scanner
+                            '''
+                        }
+                    }
                 }
             }
         }
